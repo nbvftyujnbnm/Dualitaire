@@ -7,7 +7,9 @@ import {
   onAuthStateChanged 
 } from 'firebase/auth';
 import { 
-  getFirestore, 
+  getFirestore,
+  initializeFirestore,
+  memoryLocalCache,
   collection, 
   doc, 
   setDoc, 
@@ -15,9 +17,10 @@ import {
   updateDoc, 
   arrayUnion,
   increment,
-  serverTimestamp
+  serverTimestamp,
+  runTransaction
 } from 'firebase/firestore';
-import { AlertCircle, Play, Users, Trophy, Snowflake, RefreshCw, Hand, Shield, Flag, Clock, Zap } from 'lucide-react';
+import { AlertCircle, Play, Users, Trophy, Snowflake, RefreshCw, Hand, Shield, Flag, Clock, Zap, Swords, Eye, Crown, User } from 'lucide-react';
 
 // --- Configuration Helper ---
 const getFirebaseConfig = () => {
@@ -45,7 +48,12 @@ const getAppId = () => {
 const firebaseConfig = getFirebaseConfig();
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db = getFirestore(app);
+
+// FIX: Firestoreの接続エラー回避のためメモリキャッシュを使用
+const db = initializeFirestore(app, {
+  localCache: memoryLocalCache()
+});
+
 const appId = getAppId();
 
 // --- Game Constants ---
@@ -54,6 +62,7 @@ const RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
 const ATTACK_THRESHOLD = 2; 
 const GAME_DURATION_SEC = 180; 
 const COMBO_WINDOW_MS = 3000; 
+const MAX_ROUNDS = 3;
 
 const createDeck = () => {
   const deck = [];
@@ -85,14 +94,10 @@ const shuffle = (array) => {
 // --- Components ---
 
 const Card = ({ card, onClick, isSelected, isFrozen, style }) => {
-  // Placeholder for empty slots
   if (!card) return (
-    <div 
-      className="w-full aspect-[5/7] border-2 border-dashed border-white/10 rounded-md bg-white/5 box-border" 
-    />
+    <div className="w-full aspect-[5/7] border-2 border-dashed border-white/10 rounded-md bg-white/5 box-border" />
   );
 
-  // Back of card
   if (!card.faceUp) {
     return (
       <div 
@@ -105,7 +110,6 @@ const Card = ({ card, onClick, isSelected, isFrozen, style }) => {
     );
   }
 
-  // Front of card
   return (
     <div 
       onClick={onClick}
@@ -116,21 +120,15 @@ const Card = ({ card, onClick, isSelected, isFrozen, style }) => {
         ${isFrozen ? 'after:content-[""] after:absolute after:inset-0 after:bg-blue-400/50 after:backdrop-blur-[1px] after:rounded-md' : ''}
       `}
     >
-      {/* Top Left: Rank */}
       <div className={`absolute top-[4%] left-[8%] font-bold leading-none text-[clamp(10px,3vw,18px)] tracking-tighter ${card.color === 'red' ? 'text-red-600' : 'text-gray-900'}`}>
         {card.rank}
       </div>
-
-      {/* Top Right: Suit */}
       <div className={`absolute top-[4%] right-[8%] leading-none text-[clamp(10px,2.5vw,16px)] ${card.color === 'red' ? 'text-red-600' : 'text-gray-900'}`}>
         {card.suit}
       </div>
-
-      {/* Center Suit (Decoration) */}
       <div className={`absolute bottom-[10%] right-[10%] opacity-20 transform scale-[2.5] text-[clamp(12px,4vw,24px)] ${card.color === 'red' ? 'text-red-600' : 'text-gray-900'}`}>
         {card.suit}
       </div>
-
       {isFrozen && <Snowflake className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-blue-600 w-1/2 h-1/2 animate-pulse" />}
     </div>
   );
@@ -141,7 +139,7 @@ const Card = ({ card, onClick, isSelected, isFrozen, style }) => {
 export default function App() {
   const [user, setUser] = useState(null);
   const [roomId, setRoomId] = useState('');
-  const [gameState, setGameState] = useState('lobby'); // lobby, waiting, playing, finished
+  const [gameState, setGameState] = useState('lobby'); // lobby, room_lobby, count_down, playing, intermission, finished
   const [roomData, setRoomData] = useState(null);
   
   // Game Logic State
@@ -159,6 +157,9 @@ export default function App() {
   const [combo, setCombo] = useState(0);
   const [lastMoveTime, setLastMoveTime] = useState(0);
   const [comboTimer, setComboTimer] = useState(0); 
+  
+  // 3-Round System & Start Countdown
+  const [countDown, setCountDown] = useState(null);
   
   // Effects
   const [lastAttackId, setLastAttackId] = useState(null);
@@ -179,7 +180,7 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Room Listener & Timer Sync
+  // Room Listener
   useEffect(() => {
     if (!user || !roomId) return;
 
@@ -188,28 +189,70 @@ export default function App() {
         const data = docSnapshot.data();
         setRoomData(data);
         
-        if (data.status === 'playing' && gameState === 'waiting') {
-          startGameLocal();
-          setGameState('playing');
+        // --- State Transitions ---
+        // 外部（Firestore）の状態変化に合わせてローカルのgameStateを変更
+
+        // 1. ロビー待機
+        if (data.status === 'waiting' && gameState !== 'room_lobby') {
+            setGameState('room_lobby');
         }
 
+        // 2. カウントダウン開始
+        if (data.status === 'count_down' && gameState !== 'count_down' && gameState !== 'playing') {
+            startCountDownSequence();
+        }
+
+        // 3. ゲーム中 (途中参加やリロード時の復帰用)
+        if (data.status === 'playing' && (gameState === 'waiting' || gameState === 'intermission' || gameState === 'room_lobby' || gameState === 'lobby')) {
+             setGameState('playing');
+        }
+
+        // 4. インターミッション（ラウンド終了）
+        if (data.status === 'intermission' && gameState === 'playing') {
+          setGameState('intermission');
+          if (timerRef.current) clearInterval(timerRef.current);
+        }
+
+        // 5. 最終結果
         if (data.status === 'finished' && gameState !== 'finished') {
           setGameState('finished');
           if (timerRef.current) clearInterval(timerRef.current);
         }
 
-        if (data.attacks && data.attacks.length > 0) {
-          const latestAttack = data.attacks[data.attacks.length - 1];
-          if (latestAttack.target === user.uid && latestAttack.id !== lastAttackId) {
-            triggerFreezeEffect();
-            setLastAttackId(latestAttack.id);
-          }
+        // 攻撃処理
+        if (user && (data.host === user.uid || data.guest === user.uid)) {
+            if (data.attacks && data.attacks.length > 0) {
+                const latestAttack = data.attacks[data.attacks.length - 1];
+                if (latestAttack.target === user.uid && latestAttack.id !== lastAttackId) {
+                    triggerFreezeEffect();
+                    setLastAttackId(latestAttack.id);
+                }
+            }
         }
       }
+    }, (error) => {
+        console.error("Firestore Snapshot Error:", error);
     });
 
     return () => unsub();
   }, [user, roomId, gameState, lastAttackId]);
+
+  // --- 修正: ゲーム開始トリガー ---
+  // gameStateが 'playing' になった瞬間にカードを配る（プレイヤーのみ）
+  // useEffectを使うことで、状態遷移後に確実に実行されるようにする
+  useEffect(() => {
+      if (gameState === 'playing' && user && roomData) {
+          const isHost = roomData.host === user.uid;
+          const isGuest = roomData.guest === user.uid;
+          
+          if (isHost || isGuest) {
+              // 既にカードがある場合はリセットしない（リロード対策が必要なら別途ロジックが必要だが、今回は簡易的に）
+              if (deck.length === 0 && tableau.length === 0) {
+                  startGameLocal();
+              }
+          }
+      }
+  }, [gameState, user, roomData]); // 依存配列に注意
 
   // Timer Logic
   useEffect(() => {
@@ -223,14 +266,14 @@ export default function App() {
 
         if (remaining <= 0) {
           clearInterval(timerRef.current);
-          handleTimeUp();
+          if (roomData.host === user.uid) handleTimeUp(); // Host triggers time-up
         }
       }, 1000);
     }
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [gameState, roomData]);
+  }, [gameState, roomData, user]);
 
   // Combo Timer Logic
   useEffect(() => {
@@ -254,9 +297,37 @@ export default function App() {
     };
   }, [combo, lastMoveTime]);
 
-  // --- Game Mechanics ---
+  // --- Role Helpers ---
+  const isHost = roomData?.host === user?.uid;
+  const isGuest = roomData?.guest === user?.uid;
+  const isPlayer = isHost || isGuest;
+  const isSpectator = !isPlayer && roomData;
+
+  // --- Game Control ---
+
+  const startCountDownSequence = () => {
+    setGameState('count_down');
+    // Clear board for visual clarity
+    setDeck([]); setTableau([]); setWaste([]); setFoundation([[],[],[],[]]);
+    
+    setCountDown(3);
+    let count = 3;
+    const interval = setInterval(() => {
+      count--;
+      setCountDown(count);
+      if (count <= 0) {
+        clearInterval(interval);
+        setTimeout(() => {
+            // ここでは gameState を変えるだけにする
+            // 実際の startGameLocal は useEffect でトリガーされる
+            setGameState('playing');
+        }, 500);
+      }
+    }, 1000);
+  };
 
   const startGameLocal = () => {
+    console.log("Starting Local Game..."); // Debug
     const newDeck = createDeck();
     const newTableau = Array(7).fill().map(() => []);
     
@@ -279,104 +350,59 @@ export default function App() {
     setCombo(0);
   };
 
-  const handleTimeUp = async () => {
-    if (!roomData) return;
-    const isHost = roomData.host === user.uid;
-    const myCurrentScore = myScore;
-    const opponentScore = isHost ? roomData.guestScore : roomData.hostScore;
-    
-    let winnerId = null;
-    if (myCurrentScore > opponentScore) winnerId = user.uid;
-    else if (opponentScore > myCurrentScore) winnerId = isHost ? roomData.guest : roomData.host;
-    else winnerId = 'draw';
-
-    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', `room_${roomId}`), {
-        status: 'finished',
-        winner: winnerId
-    });
-  };
-
-  const triggerFreezeEffect = () => {
-    const availableCols = tableau.map((col, idx) => col.length > 0 ? idx : -1).filter(idx => idx !== -1);
-    if (availableCols.length === 0) return;
-
-    const targetCol = availableCols[Math.floor(Math.random() * availableCols.length)];
-    setFrozenColumns(prev => ({
-      ...prev,
-      [targetCol]: Date.now() + 5000 
-    }));
-
-    setTimeout(() => {
-      setFrozenColumns(prev => {
-        const newState = { ...prev };
-        delete newState[targetCol];
-        return newState;
+  const triggerStartGame = async () => {
+      if (!isHost) return;
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', `room_${roomId}`), {
+          status: 'count_down',
+          startTime: serverTimestamp() 
       });
-    }, 5000);
   };
 
-  const sendAttack = async () => {
-    if (!roomData) return;
-    const opponentId = roomData.host === user.uid ? roomData.guest : roomData.host;
-    if (!opponentId) return;
-
-    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', `room_${roomId}`), {
-      attacks: arrayUnion({
-        id: crypto.randomUUID(),
-        target: opponentId,
-        type: 'freeze',
-        timestamp: Date.now()
-      })
-    });
-  };
-
-  const updateScore = async (points, isFoundationMove = false) => {
-    let multiplier = 1;
-    let addedScore = points;
-
-    if (isFoundationMove) {
-      const now = Date.now();
-      if (now - lastMoveTime < COMBO_WINDOW_MS) {
-        const newCombo = combo + 1;
-        setCombo(newCombo);
-        multiplier = 1 + (newCombo * 0.2); 
-      } else {
-        setCombo(1);
-      }
-      setLastMoveTime(now);
-      
-      addedScore = Math.floor(points * multiplier);
-
-      const chargeAmount = combo > 2 ? 2 : 1;
-      const newCharge = attackCharge + chargeAmount;
-      if (newCharge >= ATTACK_THRESHOLD) {
-        sendAttack();
-        setAttackCharge(0);
-      } else {
-        setAttackCharge(newCharge);
-      }
-    }
-
-    const newScore = myScore + addedScore;
-    setMyScore(newScore);
+  const handleTimeUp = async () => {
+    if (!roomData || !isHost) return; 
     
-    if (!roomData) return;
-    const field = roomData.host === user.uid ? 'hostScore' : 'guestScore';
-    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', `room_${roomId}`), {
-      [field]: newScore
-    });
+    const hostTotal = (roomData.hostTotalScore || 0) + roomData.hostScore;
+    const guestTotal = (roomData.guestTotalScore || 0) + roomData.guestScore;
 
-    if (newScore > 5000 && deck.length === 0 && waste.length === 0) {
-         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', `room_${roomId}`), {
+    if (roomData.currentRound >= MAX_ROUNDS) {
+        let winnerId = 'draw';
+        if (hostTotal > guestTotal) winnerId = roomData.host;
+        if (guestTotal > hostTotal) winnerId = roomData.guest;
+
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', `room_${roomId}`), {
             status: 'finished',
-            winner: user.uid
+            winner: winnerId,
+            hostTotalScore: hostTotal, 
+            guestTotalScore: guestTotal,
+            hostScore: 0,
+            guestScore: 0
+        });
+    } else {
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', `room_${roomId}`), {
+            status: 'intermission',
+            hostTotalScore: hostTotal,
+            guestTotalScore: guestTotal
         });
     }
+  };
+
+  const nextRound = async () => {
+      if (!isHost) return;
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', `room_${roomId}`), {
+          status: 'count_down',
+          currentRound: increment(1),
+          hostScore: 0,
+          guestScore: 0,
+          hostCharge: 0,
+          guestCharge: 0,
+          startTime: serverTimestamp()
+      });
   };
 
   // --- Interaction Logic ---
 
   const handleStockClick = () => {
+    if (!isPlayer) return;
     if (deck.length === 0) {
       if (waste.length === 0) return;
       const newDeck = [...waste].map(c => ({...c, faceUp: false}));
@@ -394,9 +420,9 @@ export default function App() {
   };
 
   const handleCardClick = (pileType, pileIndex, cardIndex, card) => {
+    if (!isPlayer) return;
     if (pileType === 'tableau' && frozenColumns[pileIndex]) return;
 
-    // --- Smart Move Logic ---
     const isTopCard = 
       (pileType === 'waste' && cardIndex === waste.length - 1) ||
       (pileType === 'tableau' && cardIndex === tableau[pileIndex].length - 1);
@@ -414,27 +440,14 @@ export default function App() {
        }
     }
 
-    // --- Standard Selection Logic ---
     if (!selectedCard) {
       if (!card) return; 
-      
-      // Auto-flip fallback logic just in case
-      if (pileType === 'tableau' && !card.faceUp) {
-          if (cardIndex === tableau[pileIndex].length - 1) {
-              const newTableau = [...tableau];
-              newTableau[pileIndex][cardIndex].faceUp = true;
-              setTableau(newTableau);
-              updateScore(5);
-          }
-          return;
-      }
+      if (pileType === 'tableau' && !card.faceUp) return;
       if (pileType === 'foundation') return; 
-      
       setSelectedCard({ pileType, pileIndex, cardIndex, card });
       return;
     }
 
-    // --- Move Logic ---
     const source = selectedCard;
     if (source.card.id === card?.id) {
       setSelectedCard(null);
@@ -463,28 +476,20 @@ export default function App() {
 
   const isValidFoundationMove = (card, pileIndex) => {
     const targetPile = foundation[pileIndex];
-    if (targetPile.length === 0) {
-      return card.rank === 'A';
-    }
+    if (targetPile.length === 0) return card.rank === 'A';
     const topCard = targetPile[targetPile.length - 1];
     return card.suit === topCard.suit && card.value === topCard.value + 1;
   };
 
   const isValidTableauMove = (card, pileIndex) => {
     const targetPile = tableau[pileIndex];
-    if (targetPile.length === 0) {
-      return card.rank === 'K';
-    }
+    if (targetPile.length === 0) return card.rank === 'K';
     const topCard = targetPile[targetPile.length - 1];
-    const isColorDifferent = card.color !== topCard.color;
-    const isRankLower = card.value === topCard.value - 1;
-    return isColorDifferent && isRankLower;
+    return card.color !== topCard.color && card.value === topCard.value - 1;
   };
 
   const executeMove = (source, dest) => {
     let cardsToMove = [];
-    
-    // Remove Logic & Auto Flip Check
     if (source.pileType === 'waste') {
       cardsToMove = [waste[waste.length - 1]];
       setWaste(prev => prev.slice(0, -1));
@@ -492,88 +497,133 @@ export default function App() {
       const sourceCol = tableau[source.pileIndex];
       cardsToMove = sourceCol.slice(source.cardIndex);
       const newSourceCol = sourceCol.slice(0, source.cardIndex);
-      
-      // Auto Flip Logic
       const lastIndex = newSourceCol.length - 1;
       if (lastIndex >= 0 && !newSourceCol[lastIndex].faceUp) {
           newSourceCol[lastIndex] = { ...newSourceCol[lastIndex], faceUp: true };
-          // We call updateScore(5) below for the flip bonus
           setTimeout(() => updateScore(5), 0);
       }
-
-      setTableau(prev => {
-        const newT = [...prev];
-        newT[source.pileIndex] = newSourceCol;
-        return newT;
-      });
+      setTableau(prev => { const newT = [...prev]; newT[source.pileIndex] = newSourceCol; return newT; });
     }
 
-    // Add Logic
     if (dest.pileType === 'foundation') {
-      setFoundation(prev => {
-        const newF = [...prev];
-        newF[dest.pileIndex] = [...newF[dest.pileIndex], cardsToMove[0]];
-        return newF;
-      });
+      setFoundation(prev => { const newF = [...prev]; newF[dest.pileIndex] = [...newF[dest.pileIndex], cardsToMove[0]]; return newF; });
     } else if (dest.pileType === 'tableau') {
-      setTableau(prev => {
-        const newT = [...prev];
-        newT[dest.pileIndex] = [...newT[dest.pileIndex], ...cardsToMove];
-        return newT;
-      });
+      setTableau(prev => { const newT = [...prev]; newT[dest.pileIndex] = [...newT[dest.pileIndex], ...cardsToMove]; return newT; });
     }
-    
     setSelectedCard(null);
   };
 
-  // --- Helpers ---
+  const updateScore = async (points, isFoundationMove = false) => {
+    let multiplier = 1;
+    let addedScore = points;
+    let newCharge = attackCharge;
+
+    if (isFoundationMove) {
+      const now = Date.now();
+      if (now - lastMoveTime < COMBO_WINDOW_MS) {
+        const newCombo = combo + 1;
+        setCombo(newCombo);
+        multiplier = 1 + (newCombo * 0.2); 
+      } else {
+        setCombo(1);
+      }
+      setLastMoveTime(now);
+      
+      addedScore = Math.floor(points * multiplier);
+
+      const chargeAmount = combo > 2 ? 2 : 1;
+      newCharge = attackCharge + chargeAmount;
+      if (newCharge >= ATTACK_THRESHOLD) {
+        sendAttack();
+        setAttackCharge(0);
+        newCharge = 0;
+      } else {
+        setAttackCharge(newCharge);
+      }
+    }
+
+    const newScore = myScore + addedScore;
+    setMyScore(newScore);
+    
+    if (!roomData) return;
+    const scoreField = isHost ? 'hostScore' : 'guestScore';
+    const chargeField = isHost ? 'hostCharge' : 'guestCharge';
+
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', `room_${roomId}`), {
+      [scoreField]: newScore,
+      [chargeField]: newCharge
+    });
+  };
+
+  const triggerFreezeEffect = () => {
+    const availableCols = tableau.map((col, idx) => col.length > 0 ? idx : -1).filter(idx => idx !== -1);
+    if (availableCols.length === 0) return;
+    const targetCol = availableCols[Math.floor(Math.random() * availableCols.length)];
+    setFrozenColumns(prev => ({...prev, [targetCol]: Date.now() + 5000 }));
+    setTimeout(() => {
+      setFrozenColumns(prev => { const newState = { ...prev }; delete newState[targetCol]; return newState; });
+    }, 5000);
+  };
+
+  const sendAttack = async () => {
+    if (!roomData) return;
+    const opponentId = roomData.host === user.uid ? roomData.guest : roomData.host;
+    if (!opponentId) return;
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', `room_${roomId}`), {
+      attacks: arrayUnion({ id: crypto.randomUUID(), target: opponentId, type: 'freeze', timestamp: Date.now() })
+    });
+  };
+
+  // --- Room Management ---
 
   const createRoom = async () => {
     const newRoomId = Math.random().toString(36).substring(2, 7).toUpperCase();
     await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', `room_${newRoomId}`), {
       host: user.uid,
-      status: 'waiting',
-      hostScore: 0,
-      guestScore: 0,
+      guest: null,
+      status: 'waiting', 
+      hostScore: 0, guestScore: 0,
+      hostTotalScore: 0, guestTotalScore: 0,
+      hostCharge: 0, guestCharge: 0,
+      currentRound: 1,
+      spectators: [],
       attacks: [],
       createdAt: serverTimestamp()
     });
     setRoomId(newRoomId);
-    setGameState('waiting');
+    setGameState('room_lobby');
   };
 
   const joinRoom = async (inputRoomId) => {
     const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', `room_${inputRoomId}`);
-    await updateDoc(roomRef, {
-      guest: user.uid,
-      status: 'playing',
-      startTime: serverTimestamp() 
-    });
-    setRoomId(inputRoomId);
-    setGameState('playing');
-    startGameLocal();
+    try {
+        await runTransaction(db, async (transaction) => {
+            const roomDoc = await transaction.get(roomRef);
+            if (!roomDoc.exists()) throw "Room does not exist!";
+            const data = roomDoc.data();
+
+            if (!data.guest) {
+                transaction.update(roomRef, { guest: user.uid });
+            } else if (data.guest !== user.uid && data.host !== user.uid) {
+                transaction.update(roomRef, { spectators: arrayUnion(user.uid) });
+            }
+        });
+        setRoomId(inputRoomId);
+        setGameState('room_lobby');
+    } catch (e) {
+        console.error("Join failed", e);
+        alert("ルームに参加できませんでした。");
+    }
   };
 
   const handleGiveUp = async () => {
-    if (!window.confirm('本当に降参しますか？')) return;
-    if (!roomData) return;
-
-    const opponentId = roomData.host === user.uid ? roomData.guest : roomData.host;
-    if (!opponentId) {
-        setGameState('lobby');
-        setRoomId('');
-        return;
+    if (!isPlayer) return;
+    if (!window.confirm('このラウンドを降参しますか？')) return;
+    if (isHost) handleTimeUp(); 
+    else {
+        alert("ホストのみがラウンドを終了できます（機能制限）");
     }
-
-    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', `room_${roomId}`), {
-        status: 'finished',
-        winner: opponentId
-    });
   };
-
-  // --- Render ---
-
-  if (!user) return <div className="flex items-center justify-center h-screen bg-indigo-900 text-white">Loading Auth...</div>;
 
   const formatTime = (seconds) => {
     const m = Math.floor(seconds / 60);
@@ -584,75 +634,87 @@ export default function App() {
   return (
     <div className="h-[100dvh] bg-gradient-to-b from-slate-900 to-indigo-950 font-sans text-gray-100 overflow-hidden select-none touch-manipulation flex flex-col">
       
-      {/* Header / HUD */}
+      {/* Header */}
       <header className="bg-black/40 backdrop-blur-md px-2 py-1 flex justify-between items-center border-b border-white/10 shrink-0 h-12 relative z-20">
-        
-        {/* Left: Player Info & Combo */}
-        <div className="flex items-center gap-2">
-           <div className="relative">
-             <div className="bg-indigo-600 p-1.5 rounded-lg shadow-lg border border-indigo-400">
-               <Trophy size={14} className="text-yellow-300" />
-             </div>
-             {combo > 1 && (
-               <div className="absolute -bottom-4 left-0 bg-yellow-500 text-black text-[9px] font-black px-1.5 rounded-full animate-bounce whitespace-nowrap shadow-lg border border-white z-50">
-                 {combo} COMBO
-               </div>
-             )}
-           </div>
-           <div>
-             <div className="text-[8px] text-gray-400 uppercase tracking-wider font-bold">You</div>
-             <div className="font-black text-base leading-none font-mono tabular-nums">{myScore}</div>
-           </div>
-        </div>
+        {(gameState !== 'lobby' && gameState !== 'room_lobby') && (
+        <>
+            {/* Left: You */}
+            <div className="flex items-center gap-2">
+                <div className="relative">
+                    <div className={`p-1.5 rounded-lg shadow-lg border ${isSpectator ? 'bg-gray-700 border-gray-500' : 'bg-indigo-600 border-indigo-400'}`}>
+                        {isSpectator ? <Eye size={14} className="text-gray-300"/> : <Trophy size={14} className="text-yellow-300" />}
+                    </div>
+                    {!isSpectator && combo > 1 && (
+                        <div className="absolute -bottom-4 left-0 bg-yellow-500 text-black text-[9px] font-black px-1.5 rounded-full animate-bounce whitespace-nowrap shadow-lg border border-white z-50">
+                            {combo} COMBO
+                        </div>
+                    )}
+                </div>
+                <div>
+                    <div className="text-[8px] text-gray-400 uppercase tracking-wider font-bold">
+                        {isHost ? 'HOST (YOU)' : isSpectator ? 'HOST' : 'GUEST (YOU)'}
+                    </div>
+                    <div className="font-black text-base leading-none font-mono tabular-nums">
+                        {isSpectator ? roomData?.hostScore || 0 : myScore}
+                    </div>
+                </div>
+            </div>
 
-        {/* Center: Timer & Status */}
-        <div className="flex flex-col items-center absolute left-1/2 -translate-x-1/2 top-1">
-            {gameState === 'playing' ? (
-                <>
-                  <div className={`flex items-center gap-1 font-mono text-base font-bold ${timeLeft < 30 ? 'text-red-400 animate-pulse' : 'text-white'}`}>
-                    <Clock size={12} />
-                    {formatTime(timeLeft)}
-                  </div>
-                  
-                  {/* Attack Gauge */}
-                  <div className="flex gap-0.5 mt-0.5">
-                     {[...Array(ATTACK_THRESHOLD)].map((_, i) => (
-                         <div key={i} className={`w-2 h-2 rounded-sm border border-black/50 transition-all duration-300 ${i < attackCharge ? 'bg-gradient-to-tr from-red-600 to-orange-400 shadow-[0_0_8px_rgba(239,68,68,0.8)] scale-110' : 'bg-gray-800'}`} />
-                     ))}
-                  </div>
+            {/* Center: Status */}
+            <div className="flex flex-col items-center absolute left-1/2 -translate-x-1/2 top-1">
+                {gameState === 'playing' || gameState === 'count_down' ? (
+                    <>
+                        <div className="flex items-center gap-2">
+                            <div className="bg-white/10 px-1.5 rounded text-[10px] font-bold text-indigo-200">R{roomData?.currentRound}</div>
+                            <div className={`flex items-center gap-1 font-mono text-base font-bold ${timeLeft < 30 ? 'text-red-400 animate-pulse' : 'text-white'}`}>
+                                <Clock size={12} />
+                                {formatTime(timeLeft)}
+                            </div>
+                        </div>
+                        <div className="flex gap-4 mt-1 opacity-50 text-[8px]">
+                            {isSpectator && <span>WATCHING MATCH</span>}
+                        </div>
+                    </>
+                ) : (
+                    <div className="text-[10px] font-bold text-indigo-300 tracking-[0.2em] mt-2">DUALITAIRE</div>
+                )}
+            </div>
 
-                  {/* Combo Bar */}
-                  {combo > 0 && (
-                     <div className="w-12 h-0.5 bg-gray-800 rounded-full mt-1 overflow-hidden">
-                        <div 
-                          className="h-full bg-yellow-400 transition-all duration-100 ease-linear"
-                          style={{ width: `${comboTimer}%` }}
-                        />
-                     </div>
-                  )}
-                </>
-            ) : (
-                <div className="text-[10px] font-bold text-indigo-300 tracking-[0.2em] mt-2">DUALITAIRE</div>
-            )}
-        </div>
-
-        {/* Right: Opponent Info */}
-        <div className="flex items-center gap-2 text-right">
-           <div>
-             <div className="text-[8px] text-gray-400 uppercase tracking-wider font-bold">Rival</div>
-             <div className="font-black text-base leading-none font-mono tabular-nums text-gray-300">
-               {roomData ? (roomData.host === user.uid ? roomData.guestScore || 0 : roomData.hostScore || 0) : 0}
-             </div>
-           </div>
-           <div className="bg-slate-800 p-1.5 rounded-lg shadow-lg border border-slate-600">
-             <Users size={14} className="text-red-400" />
-           </div>
-        </div>
+            {/* Right: Rival */}
+            <div className="flex items-center gap-2 text-right">
+                <div className="flex flex-col items-end">
+                    <div className="text-[8px] text-gray-400 uppercase tracking-wider font-bold">
+                        {isSpectator ? 'GUEST' : 'RIVAL'}
+                    </div>
+                    <div className="font-black text-base leading-none font-mono tabular-nums text-gray-300">
+                        {isSpectator ? roomData?.guestScore || 0 : (isHost ? roomData?.guestScore : roomData?.hostScore) || 0}
+                    </div>
+                    <div className="flex gap-0.5 mt-0.5">
+                        {[...Array(ATTACK_THRESHOLD)].map((_, i) => {
+                            const chg = isSpectator ? roomData?.guestCharge : (isHost ? roomData?.guestCharge : roomData?.hostCharge);
+                            return <div key={i} className={`w-1.5 h-1.5 rounded-full border border-black/30 ${i < (chg||0) ? 'bg-red-500' : 'bg-gray-700'}`} />
+                        })}
+                    </div>
+                </div>
+                <div className="bg-slate-800 p-1.5 rounded-lg shadow-lg border border-slate-600">
+                    <Users size={14} className="text-red-400" />
+                </div>
+            </div>
+        </>
+        )}
       </header>
 
-      {/* Main Game Area */}
+      {/* Main Content */}
       <main className="flex-1 p-1 max-w-lg mx-auto w-full flex flex-col relative z-10 overflow-hidden">
         
+        {gameState === 'count_down' && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+                <div className="text-8xl font-black text-white animate-ping">
+                    {countDown > 0 ? countDown : 'GO!'}
+                </div>
+            </div>
+        )}
+
         {gameState === 'lobby' && (
           <div className="flex-1 flex flex-col items-center justify-center gap-6 animate-in fade-in zoom-in duration-500 w-full">
             <div className="text-center">
@@ -660,6 +722,11 @@ export default function App() {
                 DUALITAIRE
                 </h1>
                 <p className="text-indigo-200 text-xs tracking-widest uppercase opacity-80">Competitive Solitaire</p>
+                <div className="mt-4 flex justify-center gap-2 text-[10px] text-gray-400 border border-white/10 rounded-full px-4 py-1 bg-black/20">
+                    <span className="flex items-center gap-1"><Clock size={10}/> 3 MINS</span>
+                    <span>•</span>
+                    <span className="flex items-center gap-1"><Swords size={10}/> 3 ROUNDS</span>
+                </div>
             </div>
             
             <div className="bg-black/20 backdrop-blur-sm p-4 sm:p-6 rounded-2xl border border-white/5 space-y-4 w-full max-w-[300px] sm:max-w-xs box-border">
@@ -669,50 +736,89 @@ export default function App() {
               >
                 <Play size={18} /> CREATE ROOM
               </button>
-              
               <div className="flex gap-2 w-full">
-                  <input 
-                    type="text" 
-                    placeholder="ID"
-                    className="flex-1 min-w-0 bg-black/40 border-2 border-white/10 rounded-xl px-3 text-white placeholder-white/20 outline-none focus:border-indigo-400 transition-colors uppercase text-center font-mono tracking-widest"
-                    id="roomInput"
-                  />
-                  <button 
-                    onClick={() => {
-                        const val = document.getElementById('roomInput').value.toUpperCase();
-                        if(val) joinRoom(val);
-                    }}
-                    className="shrink-0 bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 px-4 rounded-xl shadow-[0_4px_0_rgb(51,65,85)] active:shadow-none active:translate-y-[4px] transition-all"
-                  >
-                    JOIN
-                  </button>
+                  <input type="text" placeholder="ID" className="flex-1 min-w-0 bg-black/40 border-2 border-white/10 rounded-xl px-3 text-white placeholder-white/20 outline-none focus:border-indigo-400 transition-colors uppercase text-center font-mono tracking-widest" id="roomInput"/>
+                  <button onClick={() => { const val = document.getElementById('roomInput').value.toUpperCase(); if(val) joinRoom(val); }} className="shrink-0 bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 px-4 rounded-xl shadow-[0_4px_0_rgb(51,65,85)] active:shadow-none active:translate-y-[4px] transition-all">JOIN</button>
               </div>
             </div>
           </div>
         )}
 
-        {gameState === 'waiting' && (
-           <div className="flex-1 flex flex-col items-center justify-center text-center animate-in pulse duration-1000">
-             <div className="relative">
-                 <div className="absolute inset-0 bg-indigo-500 blur-3xl opacity-20 rounded-full"></div>
-                 <div className="text-5xl mb-4 relative">⚔️</div>
-             </div>
-             <h2 className="text-xl font-bold mb-2 text-white">WAITING...</h2>
-             <div className="flex items-center gap-2 bg-black/40 px-4 py-2 rounded-full border border-white/10 mt-2">
-                 <span className="text-gray-400 text-xs">ROOM ID:</span>
-                 <span className="text-indigo-300 font-mono text-xl font-bold tracking-widest select-all">{roomId}</span>
+        {gameState === 'room_lobby' && (
+           <div className="flex-1 flex flex-col items-center justify-center p-4">
+             <div className="w-full max-w-sm bg-slate-900/80 border border-white/10 rounded-2xl p-6 shadow-2xl backdrop-blur-md">
+                <div className="flex justify-between items-center mb-6 border-b border-white/10 pb-4">
+                    <h2 className="text-xl font-bold text-white flex items-center gap-2"><Users size={20}/> ROOM LOBBY</h2>
+                    <span className="font-mono text-indigo-400 font-bold bg-indigo-900/30 px-3 py-1 rounded select-all">{roomId}</span>
+                </div>
+
+                <div className="space-y-3 mb-8">
+                    <div className="flex items-center justify-between bg-white/5 p-3 rounded-lg border border-white/5">
+                        <div className="flex items-center gap-3">
+                            <Crown size={18} className="text-yellow-500"/>
+                            <div>
+                                <div className="text-xs text-gray-400">HOST</div>
+                                <div className="font-bold">{roomData?.host ? 'Player 1' : '...'}</div>
+                            </div>
+                        </div>
+                        {isHost && <span className="text-[10px] bg-yellow-500/20 text-yellow-300 px-2 py-0.5 rounded">YOU</span>}
+                    </div>
+
+                    <div className={`flex items-center justify-between p-3 rounded-lg border ${roomData?.guest ? 'bg-white/5 border-white/5' : 'bg-black/20 border-dashed border-white/10'}`}>
+                        <div className="flex items-center gap-3">
+                            <Swords size={18} className={roomData?.guest ? "text-red-400" : "text-gray-600"}/>
+                            <div>
+                                <div className="text-xs text-gray-400">GUEST</div>
+                                <div className={roomData?.guest ? "font-bold" : "text-gray-500 italic"}>
+                                    {roomData?.guest ? 'Player 2' : 'Waiting...'}
+                                </div>
+                            </div>
+                        </div>
+                        {isGuest && <span className="text-[10px] bg-red-500/20 text-red-300 px-2 py-0.5 rounded">YOU</span>}
+                    </div>
+
+                    <div className="text-center pt-2">
+                        <div className="text-xs text-gray-500 flex items-center justify-center gap-1">
+                            <Eye size={12}/> SPECTATORS: {roomData?.spectators?.length || 0}
+                        </div>
+                        {isSpectator && <div className="text-xs text-indigo-400 mt-1">あなたは観戦モードです</div>}
+                    </div>
+                </div>
+
+                {isHost ? (
+                    <button 
+                        onClick={triggerStartGame}
+                        disabled={!roomData?.guest}
+                        className={`w-full py-4 rounded-xl font-black text-lg shadow-lg transition-all flex items-center justify-center gap-2
+                            ${roomData?.guest 
+                                ? 'bg-indigo-600 text-white hover:scale-105 active:scale-95 cursor-pointer' 
+                                : 'bg-gray-700 text-gray-500 cursor-not-allowed'}
+                        `}
+                    >
+                        {roomData?.guest ? 'START GAME' : 'WAITING FOR GUEST...'}
+                    </button>
+                ) : (
+                    <div className="text-center text-sm text-gray-400 animate-pulse">
+                        Waiting for host to start...
+                    </div>
+                )}
              </div>
            </div>
         )}
 
-        {gameState === 'playing' && (
+        {(gameState === 'playing' || gameState === 'count_down') && (
           <div className="flex-1 flex flex-col gap-2 relative h-full">
-            
-            {/* Top Row: Waste, Stock, Foundation */}
-            {/* Grid layout with fixed aspect ratio cards */}
+            {isSpectator && (
+                <div className="absolute inset-0 z-40 bg-black/60 backdrop-blur-[2px] flex flex-col items-center justify-center pointer-events-none">
+                    <div className="bg-black/80 p-6 rounded-2xl border border-white/10 text-center">
+                        <Eye size={48} className="mx-auto mb-4 text-indigo-400"/>
+                        <h3 className="text-2xl font-bold text-white mb-2">SPECTATING</h3>
+                        <p className="text-gray-400 text-sm">現在、試合を観戦中です。<br/>スコアボードで戦況を確認してください。</p>
+                    </div>
+                </div>
+            )}
+
             <div className="grid grid-cols-7 gap-1 px-1">
-              
-              {/* Stock */}
               <div onClick={handleStockClick} className="col-span-1 relative group cursor-pointer">
                    {deck.length > 0 ? (
                        <div className="w-full aspect-[5/7] bg-indigo-900 border-2 border-indigo-300/50 rounded-md shadow-sm group-active:scale-95 transition-transform">
@@ -727,8 +833,6 @@ export default function App() {
                        </div>
                    )}
               </div>
-
-              {/* Waste */}
               <div className="col-span-1 relative">
                    {waste.length > 0 ? (
                        <Card 
@@ -740,73 +844,33 @@ export default function App() {
                        <div className="w-full aspect-[5/7] border-2 border-dashed border-white/5 rounded-md" />
                    )}
               </div>
-              
-              {/* Spacer */}
               <div className="col-span-1"></div>
-
-              {/* Foundations */}
               {foundation.map((pile, idx) => (
                   <div 
                     key={`foundation-${idx}`}
                     className="col-span-1 border-2 border-white/10 bg-black/20 rounded-md flex items-center justify-center relative shadow-inner aspect-[5/7]"
                     onClick={() => handleCardClick('foundation', idx, null, null)}
                   >
-                    {pile.length === 0 ? (
-                        <div className="text-white/10 text-xl font-serif">A</div>
-                    ) : (
-                        <Card 
-                          card={pile[pile.length - 1]} 
-                          onClick={() => handleCardClick('foundation', idx, pile.length - 1, pile[pile.length - 1])}
-                        />
-                    )}
+                    {pile.length === 0 ? <div className="text-white/10 text-xl font-serif">A</div> : <Card card={pile[pile.length - 1]} onClick={() => handleCardClick('foundation', idx, pile.length - 1, pile[pile.length - 1])} />}
                   </div>
               ))}
             </div>
 
-            {/* Tableau */}
             <div className="flex-1 grid grid-cols-7 gap-1 mt-1 pb-14 px-1 overflow-hidden">
               {tableau.map((pile, colIdx) => (
                 <div key={`col-${colIdx}`} className="relative h-full">
-                   {/* Clickable Area Background */}
                    <div 
-                     className={`absolute inset-0 rounded-md transition-colors duration-300
-                        ${frozenColumns[colIdx] ? 'bg-blue-500/20 ring-1 ring-blue-400' : 'hover:bg-white/5'}
-                     `}
+                     className={`absolute inset-0 rounded-md transition-colors duration-300 ${frozenColumns[colIdx] ? 'bg-blue-500/20 ring-1 ring-blue-400' : 'hover:bg-white/5'}`}
                      onClick={() => pile.length === 0 && handleCardClick('tableau', colIdx, 0, null)}
                    >
-                       {frozenColumns[colIdx] && (
-                           <div className="absolute -top-3 left-1/2 -translate-x-1/2 z-50">
-                               <Snowflake className="text-blue-300 animate-spin-slow drop-shadow-lg" size={20} />
-                           </div>
-                       )}
-
+                       {frozenColumns[colIdx] && <div className="absolute -top-3 left-1/2 -translate-x-1/2 z-50"><Snowflake className="text-blue-300 animate-spin-slow drop-shadow-lg" size={20} /></div>}
                        {pile.length === 0 && <div className="w-full aspect-[5/7] border border-white/5 rounded-md opacity-30" />}
-                       
                        {pile.map((card, cardIdx) => {
-                         // Adjusted Stacking: 0.4rem for back, 1.8rem for front to ensure new design visibility
                          let accumulatedTop = 0;
-                         for(let i=0; i<cardIdx; i++) {
-                             accumulatedTop += pile[i].faceUp ? 1.8 : 0.4;
-                         }
-
+                         for(let i=0; i<cardIdx; i++) accumulatedTop += pile[i].faceUp ? 1.8 : 0.4;
                          return (
-                           <div 
-                             key={card.id} 
-                             className="absolute w-full transition-all duration-300 ease-out"
-                             style={{ 
-                                 top: `${accumulatedTop}rem`, 
-                                 zIndex: cardIdx 
-                             }}
-                           >
-                             <Card 
-                               card={card}
-                               isFrozen={!!frozenColumns[colIdx]}
-                               isSelected={selectedCard?.card.id === card.id}
-                               onClick={(e) => {
-                                   e.stopPropagation();
-                                   handleCardClick('tableau', colIdx, cardIdx, card);
-                               }}
-                             />
+                           <div key={card.id} className="absolute w-full transition-all duration-300 ease-out" style={{ top: `${accumulatedTop}rem`, zIndex: cardIdx }}>
+                             <Card card={card} isFrozen={!!frozenColumns[colIdx]} isSelected={selectedCard?.card.id === card.id} onClick={(e) => { e.stopPropagation(); handleCardClick('tableau', colIdx, cardIdx, card); }} />
                            </div>
                          );
                        })}
@@ -815,17 +879,17 @@ export default function App() {
               ))}
             </div>
 
-            {/* Footer Action */}
              <div className="absolute bottom-2 left-0 right-0 flex justify-center z-20 pointer-events-none">
+                {isPlayer && (
                 <button 
                     onClick={handleGiveUp}
                     className="pointer-events-auto flex items-center gap-2 px-5 py-2 bg-red-950/80 hover:bg-red-900 text-red-200 rounded-full text-xs font-bold transition-all border border-red-800 shadow-lg backdrop-blur"
                 >
                     <Flag size={12} /> GIVE UP
                 </button>
+                )}
             </div>
 
-            {/* Effects */}
             {frozenColumns && Object.keys(frozenColumns).length > 0 && (
                 <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-50 animate-in zoom-in duration-300">
                     <div className="bg-blue-600 text-white px-6 py-3 rounded-full font-black text-xl shadow-2xl transform -rotate-6 border-4 border-blue-200 flex items-center gap-2">
@@ -833,43 +897,57 @@ export default function App() {
                     </div>
                 </div>
             )}
-            
           </div>
         )}
 
-        {gameState === 'finished' && (
+        {(gameState === 'intermission' || gameState === 'finished') && (
             <div className="absolute inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-500">
                 <div className="bg-gradient-to-b from-slate-800 to-slate-900 text-white p-1 rounded-3xl max-w-sm w-full shadow-2xl border border-white/10">
                     <div className="bg-black/40 p-6 rounded-[20px] text-center">
-                        <h2 className="text-4xl font-black mb-2 uppercase italic tracking-tighter drop-shadow-xl">
-                            {roomData?.winner === 'draw' ? (
-                                <span className="text-gray-400">DRAW</span>
-                            ) : roomData?.winner === user.uid ? (
-                                <span className="text-transparent bg-clip-text bg-gradient-to-b from-yellow-300 to-yellow-600">VICTORY</span>
-                            ) : (
-                                <span className="text-gray-500">DEFEAT</span>
-                            )}
-                        </h2>
-                        
-                        <div className="py-6 space-y-3">
+                        <div className="mb-4">
+                            <h2 className="text-3xl font-black uppercase italic tracking-tighter drop-shadow-xl text-indigo-300">
+                                {gameState === 'finished' ? 'FINAL RESULT' : `ROUND ${roomData?.currentRound} OVER`}
+                            </h2>
+                        </div>
+
+                        <div className="py-4 space-y-3">
                             <div className="flex justify-between items-center bg-white/5 p-3 rounded-xl border border-white/5">
-                                <span className="text-gray-400 font-bold text-xs">YOU</span>
-                                <span className="font-mono text-2xl font-bold">{myScore}</span>
+                                <span className="text-gray-400 font-bold text-xs">HOST (Total)</span>
+                                <span className="font-mono text-2xl font-bold">{roomData?.hostTotalScore || 0}</span>
                             </div>
                             <div className="flex justify-between items-center bg-white/5 p-3 rounded-xl border border-white/5">
-                                <span className="text-gray-400 font-bold text-xs">RIVAL</span>
-                                <span className="font-mono text-2xl font-bold text-gray-500">
-                                    {roomData.host === user.uid ? roomData.guestScore : roomData.hostScore}
-                                </span>
+                                <span className="text-gray-400 font-bold text-xs">GUEST (Total)</span>
+                                <span className="font-mono text-2xl font-bold text-gray-500">{roomData?.guestTotalScore || 0}</span>
                             </div>
                         </div>
 
-                        <button 
-                            onClick={() => window.location.reload()}
-                            className="w-full bg-white text-black py-3 rounded-xl font-black text-lg shadow-lg hover:scale-105 transition-transform active:scale-95"
-                        >
-                            PLAY AGAIN
-                        </button>
+                        {gameState === 'finished' && (
+                            <div className="my-6">
+                                <div className="text-4xl font-black">
+                                    {roomData?.winner === user.uid ? (
+                                        <span className="text-transparent bg-clip-text bg-gradient-to-b from-yellow-300 to-yellow-600 animate-pulse">VICTORY!</span>
+                                    ) : roomData?.winner === 'draw' ? (
+                                        <span className="text-gray-400">DRAW</span>
+                                    ) : (
+                                        <span className="text-gray-600">{isPlayer ? "DEFEAT..." : "GAME SET"}</span>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {gameState === 'intermission' ? (
+                            isHost ? (
+                                <button onClick={nextRound} className="w-full bg-indigo-600 text-white py-3 rounded-xl font-black text-lg shadow-lg hover:scale-105 border-b-4 border-indigo-800">
+                                    NEXT ROUND <Play size={16} className="inline ml-1 mb-1"/>
+                                </button>
+                            ) : (
+                                <div className="text-sm text-gray-400 animate-pulse">Waiting for host...</div>
+                            )
+                        ) : (
+                            <button onClick={() => window.location.reload()} className="w-full bg-white text-black py-3 rounded-xl font-black text-lg shadow-lg hover:scale-105">
+                                TITLE SCREEN
+                            </button>
+                        )}
                     </div>
                 </div>
             </div>

@@ -189,45 +189,44 @@ export default function App() {
         const data = docSnapshot.data();
         setRoomData(data);
         
-        // --- State Transitions ---
-        // 外部（Firestore）の状態変化に合わせてローカルのgameStateを変更
-
-        // 1. ロビー待機
+        // State Transitions based on Room Data
+        
+        // 1. Waiting in Lobby
         if (data.status === 'waiting' && gameState !== 'room_lobby') {
             setGameState('room_lobby');
         }
 
-        // 2. カウントダウン開始
+        // 2. Start Countdown
         if (data.status === 'count_down' && gameState !== 'count_down' && gameState !== 'playing') {
             startCountDownSequence();
         }
 
-        // 3. ゲーム中 (途中参加やリロード時の復帰用)
+        // 3. Round Start (Re-sync if missed countdown)
         if (data.status === 'playing' && (gameState === 'waiting' || gameState === 'intermission' || gameState === 'room_lobby' || gameState === 'lobby')) {
+             // In case of lag or late join, jump straight to play
              setGameState('playing');
+             startGameLocal();
         }
 
-        // 4. インターミッション（ラウンド終了）
+        // 4. Intermission
         if (data.status === 'intermission' && gameState === 'playing') {
           setGameState('intermission');
           if (timerRef.current) clearInterval(timerRef.current);
         }
 
-        // 5. 最終結果
+        // 5. Finished
         if (data.status === 'finished' && gameState !== 'finished') {
           setGameState('finished');
           if (timerRef.current) clearInterval(timerRef.current);
         }
 
-        // 攻撃処理
-        if (user && (data.host === user.uid || data.guest === user.uid)) {
-            if (data.attacks && data.attacks.length > 0) {
-                const latestAttack = data.attacks[data.attacks.length - 1];
-                if (latestAttack.target === user.uid && latestAttack.id !== lastAttackId) {
-                    triggerFreezeEffect();
-                    setLastAttackId(latestAttack.id);
-                }
-            }
+        // Handle Attacks (Players only)
+        if (isPlayer && data.attacks && data.attacks.length > 0) {
+          const latestAttack = data.attacks[data.attacks.length - 1];
+          if (latestAttack.target === user.uid && latestAttack.id !== lastAttackId) {
+            triggerFreezeEffect();
+            setLastAttackId(latestAttack.id);
+          }
         }
       }
     }, (error) => {
@@ -238,21 +237,19 @@ export default function App() {
   }, [user, roomId, gameState, lastAttackId]);
 
   // --- 修正: ゲーム開始トリガー ---
-  // gameStateが 'playing' になった瞬間にカードを配る（プレイヤーのみ）
-  // useEffectを使うことで、状態遷移後に確実に実行されるようにする
   useEffect(() => {
       if (gameState === 'playing' && user && roomData) {
           const isHost = roomData.host === user.uid;
           const isGuest = roomData.guest === user.uid;
           
           if (isHost || isGuest) {
-              // 既にカードがある場合はリセットしない（リロード対策が必要なら別途ロジックが必要だが、今回は簡易的に）
+              // 既にカードがある場合はリセットしない
               if (deck.length === 0 && tableau.length === 0) {
                   startGameLocal();
               }
           }
       }
-  }, [gameState, user, roomData]); // 依存配列に注意
+  }, [gameState, user, roomData]); 
 
   // Timer Logic
   useEffect(() => {
@@ -266,7 +263,7 @@ export default function App() {
 
         if (remaining <= 0) {
           clearInterval(timerRef.current);
-          if (roomData.host === user.uid) handleTimeUp(); // Host triggers time-up
+          if (roomData.host === user.uid) handleTimeUp(); 
         }
       }, 1000);
     }
@@ -307,7 +304,6 @@ export default function App() {
 
   const startCountDownSequence = () => {
     setGameState('count_down');
-    // Clear board for visual clarity
     setDeck([]); setTableau([]); setWaste([]); setFoundation([[],[],[],[]]);
     
     setCountDown(3);
@@ -318,8 +314,6 @@ export default function App() {
       if (count <= 0) {
         clearInterval(interval);
         setTimeout(() => {
-            // ここでは gameState を変えるだけにする
-            // 実際の startGameLocal は useEffect でトリガーされる
             setGameState('playing');
         }, 500);
       }
@@ -327,7 +321,7 @@ export default function App() {
   };
 
   const startGameLocal = () => {
-    console.log("Starting Local Game..."); // Debug
+    console.log("Starting Local Game..."); 
     const newDeck = createDeck();
     const newTableau = Array(7).fill().map(() => []);
     
@@ -671,6 +665,29 @@ export default function App() {
                                 {formatTime(timeLeft)}
                             </div>
                         </div>
+                        
+                        {/* Player Gauges (Only for players) */}
+                        {!isSpectator && (
+                            <>
+                                {/* Attack Gauge */}
+                                <div className="flex gap-0.5 mt-0.5">
+                                   {[...Array(ATTACK_THRESHOLD)].map((_, i) => (
+                                       <div key={i} className={`w-2 h-2 rounded-sm border border-black/50 transition-all duration-300 ${i < attackCharge ? 'bg-gradient-to-tr from-red-600 to-orange-400 shadow-[0_0_8px_rgba(239,68,68,0.8)] scale-110' : 'bg-gray-800'}`} />
+                                   ))}
+                                </div>
+
+                                {/* Combo Bar */}
+                                {combo > 0 && (
+                                   <div className="w-12 h-0.5 bg-gray-800 rounded-full mt-1 overflow-hidden">
+                                      <div 
+                                        className="h-full bg-yellow-400 transition-all duration-100 ease-linear"
+                                        style={{ width: `${comboTimer}%` }}
+                                      />
+                                   </div>
+                                )}
+                            </>
+                        )}
+
                         <div className="flex gap-4 mt-1 opacity-50 text-[8px]">
                             {isSpectator && <span>WATCHING MATCH</span>}
                         </div>
@@ -707,6 +724,7 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 p-1 max-w-lg mx-auto w-full flex flex-col relative z-10 overflow-hidden">
         
+        {/* Count Down */}
         {gameState === 'count_down' && (
             <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
                 <div className="text-8xl font-black text-white animate-ping">
@@ -715,6 +733,7 @@ export default function App() {
             </div>
         )}
 
+        {/* Global Lobby */}
         {gameState === 'lobby' && (
           <div className="flex-1 flex flex-col items-center justify-center gap-6 animate-in fade-in zoom-in duration-500 w-full">
             <div className="text-center">
@@ -744,6 +763,7 @@ export default function App() {
           </div>
         )}
 
+        {/* Room Lobby (Waiting Room) */}
         {gameState === 'room_lobby' && (
            <div className="flex-1 flex flex-col items-center justify-center p-4">
              <div className="w-full max-w-sm bg-slate-900/80 border border-white/10 rounded-2xl p-6 shadow-2xl backdrop-blur-md">
@@ -806,6 +826,7 @@ export default function App() {
            </div>
         )}
 
+        {/* Game Area */}
         {(gameState === 'playing' || gameState === 'count_down') && (
           <div className="flex-1 flex flex-col gap-2 relative h-full">
             {isSpectator && (
@@ -900,6 +921,7 @@ export default function App() {
           </div>
         )}
 
+        {/* Results / Intermission */}
         {(gameState === 'intermission' || gameState === 'finished') && (
             <div className="absolute inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-500">
                 <div className="bg-gradient-to-b from-slate-800 to-slate-900 text-white p-1 rounded-3xl max-w-sm w-full shadow-2xl border border-white/10">

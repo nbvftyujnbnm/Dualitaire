@@ -52,8 +52,8 @@ const appId = getAppId();
 const SUITS = ['♠', '♥', '♦', '♣'];
 const RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
 const ATTACK_THRESHOLD = 2; 
-const GAME_DURATION_SEC = 180; // 3 minutes
-const COMBO_WINDOW_MS = 3000; // 3 seconds to chain combo
+const GAME_DURATION_SEC = 180; 
+const COMBO_WINDOW_MS = 3000; 
 
 const createDeck = () => {
   const deck = [];
@@ -85,37 +85,53 @@ const shuffle = (array) => {
 // --- Components ---
 
 const Card = ({ card, onClick, isSelected, isFrozen, style }) => {
-  if (!card) return <div className="w-10 h-14 sm:w-12 sm:h-16 border-2 border-dashed border-white/20 rounded bg-transparent" />;
+  // Placeholder for empty slots
+  if (!card) return (
+    <div 
+      className="w-full aspect-[5/7] border-2 border-dashed border-white/10 rounded-md bg-white/5 box-border" 
+    />
+  );
 
+  // Back of card
   if (!card.faceUp) {
     return (
       <div 
         onClick={onClick}
-        className="w-10 h-14 sm:w-12 sm:h-16 bg-indigo-900 border-2 border-white rounded shadow-md cursor-pointer hover:mt-[-2px] transition-all relative"
+        className="w-full aspect-[5/7] bg-indigo-900 border border-white/20 rounded-md shadow-sm cursor-pointer relative overflow-hidden box-border"
         style={style}
       >
-        <div className="absolute inset-1 border border-indigo-700 opacity-50 rounded-sm"></div>
+        <div className="absolute inset-1 border border-indigo-400/30 rounded-sm bg-gradient-to-br from-indigo-800 to-indigo-950 pattern-grid-lg"></div>
       </div>
     );
   }
 
+  // Front of card
   return (
     <div 
       onClick={onClick}
       style={style}
       className={`
-        w-10 h-14 sm:w-12 sm:h-16 bg-white rounded shadow-md cursor-pointer select-none flex flex-col items-center justify-center relative transition-transform duration-100
-        ${isSelected ? 'ring-4 ring-yellow-400 translate-y-[-4px] z-50' : 'hover:translate-y-[-2px]'}
-        ${isFrozen ? 'after:content-[""] after:absolute after:inset-0 after:bg-blue-400/50 after:backdrop-blur-[1px] after:rounded' : ''}
+        w-full aspect-[5/7] bg-white rounded-md shadow-sm cursor-pointer select-none relative transition-transform duration-100 box-border
+        ${isSelected ? 'ring-2 ring-yellow-400 translate-y-[-4px] z-50' : 'active:scale-95'}
+        ${isFrozen ? 'after:content-[""] after:absolute after:inset-0 after:bg-blue-400/50 after:backdrop-blur-[1px] after:rounded-md' : ''}
       `}
     >
-      <div className={`text-xs sm:text-sm font-bold ${card.color === 'red' ? 'text-red-600' : 'text-gray-900'}`}>
-        {card.suit}
-      </div>
-      <div className={`text-sm sm:text-base font-bold ${card.color === 'red' ? 'text-red-600' : 'text-gray-900'}`}>
+      {/* Top Left: Rank */}
+      <div className={`absolute top-[4%] left-[8%] font-bold leading-none text-[clamp(10px,3vw,18px)] tracking-tighter ${card.color === 'red' ? 'text-red-600' : 'text-gray-900'}`}>
         {card.rank}
       </div>
-      {isFrozen && <Snowflake className="absolute text-blue-600 w-6 h-6 animate-pulse" />}
+
+      {/* Top Right: Suit */}
+      <div className={`absolute top-[4%] right-[8%] leading-none text-[clamp(10px,2.5vw,16px)] ${card.color === 'red' ? 'text-red-600' : 'text-gray-900'}`}>
+        {card.suit}
+      </div>
+
+      {/* Center Suit (Decoration) */}
+      <div className={`absolute bottom-[10%] right-[10%] opacity-20 transform scale-[2.5] text-[clamp(12px,4vw,24px)] ${card.color === 'red' ? 'text-red-600' : 'text-gray-900'}`}>
+        {card.suit}
+      </div>
+
+      {isFrozen && <Snowflake className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-blue-600 w-1/2 h-1/2 animate-pulse" />}
     </div>
   );
 };
@@ -142,7 +158,7 @@ export default function App() {
   const [timeLeft, setTimeLeft] = useState(GAME_DURATION_SEC);
   const [combo, setCombo] = useState(0);
   const [lastMoveTime, setLastMoveTime] = useState(0);
-  const [comboTimer, setComboTimer] = useState(0); // Progress for combo bar
+  const [comboTimer, setComboTimer] = useState(0); 
   
   // Effects
   const [lastAttackId, setLastAttackId] = useState(null);
@@ -172,19 +188,16 @@ export default function App() {
         const data = docSnapshot.data();
         setRoomData(data);
         
-        // Handle Game Start
         if (data.status === 'playing' && gameState === 'waiting') {
           startGameLocal();
           setGameState('playing');
         }
 
-        // Handle Game Over
         if (data.status === 'finished' && gameState !== 'finished') {
           setGameState('finished');
           if (timerRef.current) clearInterval(timerRef.current);
         }
 
-        // Handle Attacks
         if (data.attacks && data.attacks.length > 0) {
           const latestAttack = data.attacks[data.attacks.length - 1];
           if (latestAttack.target === user.uid && latestAttack.id !== lastAttackId) {
@@ -241,14 +254,12 @@ export default function App() {
     };
   }, [combo, lastMoveTime]);
 
-
   // --- Game Mechanics ---
 
   const startGameLocal = () => {
     const newDeck = createDeck();
     const newTableau = Array(7).fill().map(() => []);
     
-    // Deal cards
     let cardIdx = 0;
     for (let i = 0; i < 7; i++) {
       for (let j = 0; j <= i; j++) {
@@ -269,15 +280,10 @@ export default function App() {
   };
 
   const handleTimeUp = async () => {
-    // Determine winner based on score
     if (!roomData) return;
     const isHost = roomData.host === user.uid;
-    const myCurrentScore = myScore; // Use local score for immediate check
+    const myCurrentScore = myScore;
     const opponentScore = isHost ? roomData.guestScore : roomData.hostScore;
-    
-    // Safety check: only host writes the finish status to avoid race conditions,
-    // unless opponent disconnected, but for simplicity both try to finish if time is up.
-    // Ideally, use a cloud function or just let the faster client win the write.
     
     let winnerId = null;
     if (myCurrentScore > opponentScore) winnerId = user.uid;
@@ -329,12 +335,11 @@ export default function App() {
     let addedScore = points;
 
     if (isFoundationMove) {
-      // Combo Logic
       const now = Date.now();
       if (now - lastMoveTime < COMBO_WINDOW_MS) {
         const newCombo = combo + 1;
         setCombo(newCombo);
-        multiplier = 1 + (newCombo * 0.2); // +20% per combo
+        multiplier = 1 + (newCombo * 0.2); 
       } else {
         setCombo(1);
       }
@@ -342,8 +347,7 @@ export default function App() {
       
       addedScore = Math.floor(points * multiplier);
 
-      // Attack Charge Logic (Faster charge on combo)
-      const chargeAmount = combo > 2 ? 2 : 1; // Bonus charge if combo > 2
+      const chargeAmount = combo > 2 ? 2 : 1;
       const newCharge = attackCharge + chargeAmount;
       if (newCharge >= ATTACK_THRESHOLD) {
         sendAttack();
@@ -370,15 +374,15 @@ export default function App() {
     }
   };
 
-  // --- Interaction Logic (Enhanced UX) ---
+  // --- Interaction Logic ---
 
   const handleStockClick = () => {
     if (deck.length === 0) {
       if (waste.length === 0) return;
-      const newDeck = [...waste].reverse().map(c => ({...c, faceUp: false}));
+      const newDeck = [...waste].map(c => ({...c, faceUp: false}));
       setDeck(newDeck);
       setWaste([]);
-      updateScore(-50); // Penalty for recycle
+      updateScore(-50);
     } else {
       const card = deck[0];
       const newDeck = deck.slice(1);
@@ -392,24 +396,20 @@ export default function App() {
   const handleCardClick = (pileType, pileIndex, cardIndex, card) => {
     if (pileType === 'tableau' && frozenColumns[pileIndex]) return;
 
-    // --- Smart Move Logic (UX Improvement) ---
-    // If clicking a card that can go to foundation, prioritize that move immediately
-    // Only applies if it's the top card of waste or tableau
+    // --- Smart Move Logic ---
     const isTopCard = 
       (pileType === 'waste' && cardIndex === waste.length - 1) ||
       (pileType === 'tableau' && cardIndex === tableau[pileIndex].length - 1);
 
     if (isTopCard && card) {
-       // Check if it fits any foundation
        for (let fIdx = 0; fIdx < 4; fIdx++) {
            if (isValidFoundationMove(card, fIdx)) {
-               // Execute Smart Move
                executeMove(
                    { pileType, pileIndex, cardIndex, card }, 
                    { pileType: 'foundation', pileIndex: fIdx }
                );
                updateScore(100, true);
-               return; // Skip selection logic
+               return; 
            }
        }
     }
@@ -417,6 +417,8 @@ export default function App() {
     // --- Standard Selection Logic ---
     if (!selectedCard) {
       if (!card) return; 
+      
+      // Auto-flip fallback logic just in case
       if (pileType === 'tableau' && !card.faceUp) {
           if (cardIndex === tableau[pileIndex].length - 1) {
               const newTableau = [...tableau];
@@ -440,7 +442,6 @@ export default function App() {
     }
 
     if (pileType === 'foundation') {
-      // Manual move to foundation (usually covered by smart move, but kept for drag/explicit click)
       if (isValidFoundationMove(source.card, pileIndex)) {
         executeMove(source, { pileType, pileIndex });
         updateScore(100, true);
@@ -483,6 +484,7 @@ export default function App() {
   const executeMove = (source, dest) => {
     let cardsToMove = [];
     
+    // Remove Logic & Auto Flip Check
     if (source.pileType === 'waste') {
       cardsToMove = [waste[waste.length - 1]];
       setWaste(prev => prev.slice(0, -1));
@@ -490,6 +492,15 @@ export default function App() {
       const sourceCol = tableau[source.pileIndex];
       cardsToMove = sourceCol.slice(source.cardIndex);
       const newSourceCol = sourceCol.slice(0, source.cardIndex);
+      
+      // Auto Flip Logic
+      const lastIndex = newSourceCol.length - 1;
+      if (lastIndex >= 0 && !newSourceCol[lastIndex].faceUp) {
+          newSourceCol[lastIndex] = { ...newSourceCol[lastIndex], faceUp: true };
+          // We call updateScore(5) below for the flip bonus
+          setTimeout(() => updateScore(5), 0);
+      }
+
       setTableau(prev => {
         const newT = [...prev];
         newT[source.pileIndex] = newSourceCol;
@@ -497,6 +508,7 @@ export default function App() {
       });
     }
 
+    // Add Logic
     if (dest.pileType === 'foundation') {
       setFoundation(prev => {
         const newF = [...prev];
@@ -535,7 +547,7 @@ export default function App() {
     await updateDoc(roomRef, {
       guest: user.uid,
       status: 'playing',
-      startTime: serverTimestamp() // Start time sync
+      startTime: serverTimestamp() 
     });
     setRoomId(inputRoomId);
     setGameState('playing');
@@ -570,26 +582,26 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-900 to-indigo-950 font-sans text-gray-100 overflow-hidden select-none touch-manipulation">
+    <div className="h-[100dvh] bg-gradient-to-b from-slate-900 to-indigo-950 font-sans text-gray-100 overflow-hidden select-none touch-manipulation flex flex-col">
       
       {/* Header / HUD */}
-      <header className="bg-black/40 backdrop-blur-md px-4 py-2 flex justify-between items-center border-b border-white/10 h-16 relative z-20">
+      <header className="bg-black/40 backdrop-blur-md px-2 py-1 flex justify-between items-center border-b border-white/10 shrink-0 h-12 relative z-20">
         
         {/* Left: Player Info & Combo */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
            <div className="relative">
-             <div className="bg-indigo-600 p-2 rounded-xl shadow-lg border border-indigo-400">
-               <Trophy size={20} className="text-yellow-300" />
+             <div className="bg-indigo-600 p-1.5 rounded-lg shadow-lg border border-indigo-400">
+               <Trophy size={14} className="text-yellow-300" />
              </div>
              {combo > 1 && (
-               <div className="absolute -bottom-6 left-0 bg-yellow-500 text-black text-xs font-black px-2 py-0.5 rounded-full animate-bounce whitespace-nowrap shadow-lg border border-white">
-                 {combo} COMBO!
+               <div className="absolute -bottom-4 left-0 bg-yellow-500 text-black text-[9px] font-black px-1.5 rounded-full animate-bounce whitespace-nowrap shadow-lg border border-white z-50">
+                 {combo} COMBO
                </div>
              )}
            </div>
            <div>
-             <div className="text-[10px] text-gray-400 uppercase tracking-wider font-bold">You</div>
-             <div className="font-black text-xl leading-none font-mono tabular-nums">{myScore}</div>
+             <div className="text-[8px] text-gray-400 uppercase tracking-wider font-bold">You</div>
+             <div className="font-black text-base leading-none font-mono tabular-nums">{myScore}</div>
            </div>
         </div>
 
@@ -597,21 +609,21 @@ export default function App() {
         <div className="flex flex-col items-center absolute left-1/2 -translate-x-1/2 top-1">
             {gameState === 'playing' ? (
                 <>
-                  <div className={`flex items-center gap-1 font-mono text-xl font-bold ${timeLeft < 30 ? 'text-red-400 animate-pulse' : 'text-white'}`}>
-                    <Clock size={16} />
+                  <div className={`flex items-center gap-1 font-mono text-base font-bold ${timeLeft < 30 ? 'text-red-400 animate-pulse' : 'text-white'}`}>
+                    <Clock size={12} />
                     {formatTime(timeLeft)}
                   </div>
                   
                   {/* Attack Gauge */}
-                  <div className="flex gap-1 mt-1">
+                  <div className="flex gap-0.5 mt-0.5">
                      {[...Array(ATTACK_THRESHOLD)].map((_, i) => (
-                         <div key={i} className={`w-3 h-3 rounded-sm border border-black/50 transition-all duration-300 ${i < attackCharge ? 'bg-gradient-to-tr from-red-600 to-orange-400 shadow-[0_0_8px_rgba(239,68,68,0.8)] scale-110' : 'bg-gray-800'}`} />
+                         <div key={i} className={`w-2 h-2 rounded-sm border border-black/50 transition-all duration-300 ${i < attackCharge ? 'bg-gradient-to-tr from-red-600 to-orange-400 shadow-[0_0_8px_rgba(239,68,68,0.8)] scale-110' : 'bg-gray-800'}`} />
                      ))}
                   </div>
 
                   {/* Combo Bar */}
                   {combo > 0 && (
-                     <div className="w-24 h-1 bg-gray-800 rounded-full mt-1 overflow-hidden">
+                     <div className="w-12 h-0.5 bg-gray-800 rounded-full mt-1 overflow-hidden">
                         <div 
                           className="h-full bg-yellow-400 transition-all duration-100 ease-linear"
                           style={{ width: `${comboTimer}%` }}
@@ -620,51 +632,49 @@ export default function App() {
                   )}
                 </>
             ) : (
-                <div className="text-sm font-bold text-indigo-300 tracking-[0.2em]">DUALITAIRE</div>
+                <div className="text-[10px] font-bold text-indigo-300 tracking-[0.2em] mt-2">DUALITAIRE</div>
             )}
         </div>
 
         {/* Right: Opponent Info */}
-        <div className="flex items-center gap-3 text-right">
+        <div className="flex items-center gap-2 text-right">
            <div>
-             <div className="text-[10px] text-gray-400 uppercase tracking-wider font-bold">Rival</div>
-             <div className="font-black text-xl leading-none font-mono tabular-nums text-gray-300">
+             <div className="text-[8px] text-gray-400 uppercase tracking-wider font-bold">Rival</div>
+             <div className="font-black text-base leading-none font-mono tabular-nums text-gray-300">
                {roomData ? (roomData.host === user.uid ? roomData.guestScore || 0 : roomData.hostScore || 0) : 0}
              </div>
            </div>
-           <div className="bg-slate-800 p-2 rounded-xl shadow-lg border border-slate-600">
-             <Users size={20} className="text-red-400" />
+           <div className="bg-slate-800 p-1.5 rounded-lg shadow-lg border border-slate-600">
+             <Users size={14} className="text-red-400" />
            </div>
         </div>
       </header>
 
       {/* Main Game Area */}
-      <main className="p-2 sm:p-4 max-w-4xl mx-auto h-[calc(100vh-64px)] flex flex-col relative z-10">
+      <main className="flex-1 p-1 max-w-lg mx-auto w-full flex flex-col relative z-10 overflow-hidden">
         
         {gameState === 'lobby' && (
-          <div className="flex-1 flex flex-col items-center justify-center gap-8 animate-in fade-in zoom-in duration-500">
+          <div className="flex-1 flex flex-col items-center justify-center gap-6 animate-in fade-in zoom-in duration-500 w-full">
             <div className="text-center">
-                <h1 className="text-5xl sm:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 drop-shadow-[0_4px_4px_rgba(0,0,0,0.5)] tracking-tighter mb-2">
+                <h1 className="text-4xl sm:text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 drop-shadow-[0_4px_4px_rgba(0,0,0,0.5)] tracking-tighter mb-1">
                 DUALITAIRE
                 </h1>
-                <p className="text-indigo-200 text-sm tracking-widest uppercase opacity-80">Competitive Solitaire Battle</p>
+                <p className="text-indigo-200 text-xs tracking-widest uppercase opacity-80">Competitive Solitaire</p>
             </div>
             
-            <div className="bg-black/20 backdrop-blur-sm p-6 rounded-2xl border border-white/5 space-y-4 max-w-xs w-full">
-               <div className="text-xs text-center text-gray-400 mb-2">ルール: 3分間でスコアを競え！<br/>連続クリアでコンボボーナス発生</div>
-               
+            <div className="bg-black/20 backdrop-blur-sm p-4 sm:p-6 rounded-2xl border border-white/5 space-y-4 w-full max-w-[300px] sm:max-w-xs box-border">
                <button 
                 onClick={createRoom}
-                className="w-full flex items-center justify-center gap-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-4 px-6 rounded-xl shadow-[0_4px_0_rgb(55,48,163)] active:shadow-none active:translate-y-[4px] transition-all group"
+                className="w-full flex items-center justify-center gap-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3.5 px-6 rounded-xl shadow-[0_4px_0_rgb(55,48,163)] active:shadow-none active:translate-y-[4px] transition-all"
               >
-                <Play size={20} className="group-hover:scale-110 transition-transform" /> 部屋を作成
+                <Play size={18} /> CREATE ROOM
               </button>
               
-              <div className="flex gap-2">
+              <div className="flex gap-2 w-full">
                   <input 
                     type="text" 
-                    placeholder="ROOM ID"
-                    className="flex-1 bg-black/40 border-2 border-white/10 rounded-xl px-4 text-white placeholder-white/20 outline-none focus:border-indigo-400 transition-colors uppercase text-center font-mono tracking-widest"
+                    placeholder="ID"
+                    className="flex-1 min-w-0 bg-black/40 border-2 border-white/10 rounded-xl px-3 text-white placeholder-white/20 outline-none focus:border-indigo-400 transition-colors uppercase text-center font-mono tracking-widest"
                     id="roomInput"
                   />
                   <button 
@@ -672,9 +682,9 @@ export default function App() {
                         const val = document.getElementById('roomInput').value.toUpperCase();
                         if(val) joinRoom(val);
                     }}
-                    className="bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 px-6 rounded-xl shadow-[0_4px_0_rgb(51,65,85)] active:shadow-none active:translate-y-[4px] transition-all"
+                    className="shrink-0 bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 px-4 rounded-xl shadow-[0_4px_0_rgb(51,65,85)] active:shadow-none active:translate-y-[4px] transition-all"
                   >
-                    参加
+                    JOIN
                   </button>
               </div>
             </div>
@@ -685,41 +695,41 @@ export default function App() {
            <div className="flex-1 flex flex-col items-center justify-center text-center animate-in pulse duration-1000">
              <div className="relative">
                  <div className="absolute inset-0 bg-indigo-500 blur-3xl opacity-20 rounded-full"></div>
-                 <div className="text-6xl mb-6 relative">⚔️</div>
+                 <div className="text-5xl mb-4 relative">⚔️</div>
              </div>
-             <h2 className="text-2xl font-bold mb-2 text-white">WAITING FOR OPPONENT</h2>
-             <div className="flex items-center gap-2 bg-black/40 px-6 py-3 rounded-full border border-white/10 mt-4">
-                 <span className="text-gray-400 text-sm">ROOM ID:</span>
-                 <span className="text-indigo-300 font-mono text-2xl font-bold tracking-widest select-all">{roomId}</span>
+             <h2 className="text-xl font-bold mb-2 text-white">WAITING...</h2>
+             <div className="flex items-center gap-2 bg-black/40 px-4 py-2 rounded-full border border-white/10 mt-2">
+                 <span className="text-gray-400 text-xs">ROOM ID:</span>
+                 <span className="text-indigo-300 font-mono text-xl font-bold tracking-widest select-all">{roomId}</span>
              </div>
            </div>
         )}
 
         {gameState === 'playing' && (
-          <div className="flex-1 flex flex-col gap-4 relative mt-2">
+          <div className="flex-1 flex flex-col gap-2 relative h-full">
             
             {/* Top Row: Waste, Stock, Foundation */}
-            <div className="flex justify-between items-start px-2">
+            {/* Grid layout with fixed aspect ratio cards */}
+            <div className="grid grid-cols-7 gap-1 px-1">
               
-              <div className="flex gap-4">
-                {/* Stock */}
-                <div onClick={handleStockClick} className="cursor-pointer relative group">
+              {/* Stock */}
+              <div onClick={handleStockClick} className="col-span-1 relative group cursor-pointer">
                    {deck.length > 0 ? (
-                       <div className="w-10 h-14 sm:w-12 sm:h-16 bg-indigo-900 border-2 border-indigo-300/50 rounded shadow-lg group-active:scale-95 transition-transform">
+                       <div className="w-full aspect-[5/7] bg-indigo-900 border-2 border-indigo-300/50 rounded-md shadow-sm group-active:scale-95 transition-transform">
                            <div className="absolute inset-1 border border-indigo-950/30 rounded-sm bg-gradient-to-br from-indigo-800 to-indigo-950"></div>
-                           <div className="absolute -top-2 -right-2 bg-red-500 text-white text-[10px] w-5 h-5 flex items-center justify-center rounded-full font-bold shadow-md border border-white/20">
+                           <div className="absolute -top-1 -right-1 bg-red-500 text-white text-[9px] w-4 h-4 flex items-center justify-center rounded-full font-bold shadow-md border border-white/20">
                                {deck.length}
                            </div>
                        </div>
                    ) : (
-                       <div className="w-10 h-14 sm:w-12 sm:h-16 border-2 border-white/10 rounded flex items-center justify-center bg-black/20">
-                           <RefreshCw size={16} className="text-white/30" />
+                       <div className="w-full aspect-[5/7] border-2 border-white/10 rounded-md flex items-center justify-center bg-black/20">
+                           <RefreshCw size={14} className="text-white/30" />
                        </div>
                    )}
-                </div>
+              </div>
 
-                {/* Waste */}
-                <div className="relative">
+              {/* Waste */}
+              <div className="col-span-1 relative">
                    {waste.length > 0 ? (
                        <Card 
                          card={waste[waste.length - 1]} 
@@ -727,21 +737,22 @@ export default function App() {
                          onClick={() => handleCardClick('waste', 0, waste.length-1, waste[waste.length-1])}
                        />
                    ) : (
-                       <div className="w-10 h-14 sm:w-12 sm:h-16 border-2 border-dashed border-white/5 rounded" />
+                       <div className="w-full aspect-[5/7] border-2 border-dashed border-white/5 rounded-md" />
                    )}
-                </div>
               </div>
+              
+              {/* Spacer */}
+              <div className="col-span-1"></div>
 
               {/* Foundations */}
-              <div className="flex gap-2">
-                {foundation.map((pile, idx) => (
+              {foundation.map((pile, idx) => (
                   <div 
                     key={`foundation-${idx}`}
-                    className="w-10 h-14 sm:w-12 sm:h-16 border-2 border-white/10 bg-black/20 rounded flex items-center justify-center relative shadow-inner"
+                    className="col-span-1 border-2 border-white/10 bg-black/20 rounded-md flex items-center justify-center relative shadow-inner aspect-[5/7]"
                     onClick={() => handleCardClick('foundation', idx, null, null)}
                   >
                     {pile.length === 0 ? (
-                        <div className="text-white/10 text-2xl font-serif">A</div>
+                        <div className="text-white/10 text-xl font-serif">A</div>
                     ) : (
                         <Card 
                           card={pile[pile.length - 1]} 
@@ -749,60 +760,68 @@ export default function App() {
                         />
                     )}
                   </div>
-                ))}
-              </div>
+              ))}
             </div>
 
             {/* Tableau */}
-            <div className="flex justify-between mt-2 h-full overflow-y-auto pb-20 px-1">
+            <div className="flex-1 grid grid-cols-7 gap-1 mt-1 pb-14 px-1 overflow-hidden">
               {tableau.map((pile, colIdx) => (
-                <div key={`col-${colIdx}`} className="flex flex-col items-center flex-1 min-w-[13%]">
+                <div key={`col-${colIdx}`} className="relative h-full">
+                   {/* Clickable Area Background */}
                    <div 
-                     className={`relative w-full flex flex-col items-center min-h-[120px] transition-all duration-300 rounded-xl p-1
-                        ${frozenColumns[colIdx] ? 'bg-blue-500/20 ring-1 ring-blue-400 shadow-[0_0_20px_rgba(59,130,246,0.3)]' : 'hover:bg-white/5'}
+                     className={`absolute inset-0 rounded-md transition-colors duration-300
+                        ${frozenColumns[colIdx] ? 'bg-blue-500/20 ring-1 ring-blue-400' : 'hover:bg-white/5'}
                      `}
                      onClick={() => pile.length === 0 && handleCardClick('tableau', colIdx, 0, null)}
                    >
                        {frozenColumns[colIdx] && (
-                           <div className="absolute -top-3 z-50">
-                               <Snowflake className="text-blue-300 animate-spin-slow drop-shadow-lg" size={24} />
+                           <div className="absolute -top-3 left-1/2 -translate-x-1/2 z-50">
+                               <Snowflake className="text-blue-300 animate-spin-slow drop-shadow-lg" size={20} />
                            </div>
                        )}
 
-                       {pile.length === 0 && <div className="w-10 h-14 sm:w-12 sm:h-16 border border-white/5 rounded opacity-30" />}
+                       {pile.length === 0 && <div className="w-full aspect-[5/7] border border-white/5 rounded-md opacity-30" />}
                        
-                       {pile.map((card, cardIdx) => (
-                         <div 
-                           key={card.id} 
-                           className="absolute transition-all duration-300 ease-out"
-                           style={{ 
-                               top: `${cardIdx * (card.faceUp ? 1.6 : 0.6) + 0.5}rem`, 
-                               zIndex: cardIdx 
-                           }}
-                         >
-                           <Card 
-                             card={card}
-                             isFrozen={!!frozenColumns[colIdx]}
-                             isSelected={selectedCard?.card.id === card.id}
-                             onClick={(e) => {
-                                 e.stopPropagation();
-                                 handleCardClick('tableau', colIdx, cardIdx, card);
+                       {pile.map((card, cardIdx) => {
+                         // Adjusted Stacking: 0.4rem for back, 1.8rem for front to ensure new design visibility
+                         let accumulatedTop = 0;
+                         for(let i=0; i<cardIdx; i++) {
+                             accumulatedTop += pile[i].faceUp ? 1.8 : 0.4;
+                         }
+
+                         return (
+                           <div 
+                             key={card.id} 
+                             className="absolute w-full transition-all duration-300 ease-out"
+                             style={{ 
+                                 top: `${accumulatedTop}rem`, 
+                                 zIndex: cardIdx 
                              }}
-                           />
-                         </div>
-                       ))}
+                           >
+                             <Card 
+                               card={card}
+                               isFrozen={!!frozenColumns[colIdx]}
+                               isSelected={selectedCard?.card.id === card.id}
+                               onClick={(e) => {
+                                   e.stopPropagation();
+                                   handleCardClick('tableau', colIdx, cardIdx, card);
+                               }}
+                             />
+                           </div>
+                         );
+                       })}
                    </div>
                 </div>
               ))}
             </div>
 
             {/* Footer Action */}
-             <div className="absolute bottom-4 left-0 right-0 flex justify-center z-20 pointer-events-none">
+             <div className="absolute bottom-2 left-0 right-0 flex justify-center z-20 pointer-events-none">
                 <button 
                     onClick={handleGiveUp}
-                    className="pointer-events-auto flex items-center gap-2 px-6 py-2 bg-red-950/80 hover:bg-red-900 text-red-200 rounded-full text-sm transition-all border border-red-800 shadow-lg backdrop-blur"
+                    className="pointer-events-auto flex items-center gap-2 px-5 py-2 bg-red-950/80 hover:bg-red-900 text-red-200 rounded-full text-xs font-bold transition-all border border-red-800 shadow-lg backdrop-blur"
                 >
-                    <Flag size={14} /> SURRENDER
+                    <Flag size={12} /> GIVE UP
                 </button>
             </div>
 
@@ -821,8 +840,8 @@ export default function App() {
         {gameState === 'finished' && (
             <div className="absolute inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-500">
                 <div className="bg-gradient-to-b from-slate-800 to-slate-900 text-white p-1 rounded-3xl max-w-sm w-full shadow-2xl border border-white/10">
-                    <div className="bg-black/40 p-8 rounded-[20px] text-center">
-                        <h2 className="text-5xl font-black mb-2 uppercase italic tracking-tighter drop-shadow-xl">
+                    <div className="bg-black/40 p-6 rounded-[20px] text-center">
+                        <h2 className="text-4xl font-black mb-2 uppercase italic tracking-tighter drop-shadow-xl">
                             {roomData?.winner === 'draw' ? (
                                 <span className="text-gray-400">DRAW</span>
                             ) : roomData?.winner === user.uid ? (
@@ -832,14 +851,14 @@ export default function App() {
                             )}
                         </h2>
                         
-                        <div className="py-6 space-y-4">
-                            <div className="flex justify-between items-center bg-white/5 p-4 rounded-xl border border-white/5">
-                                <span className="text-gray-400 font-bold text-sm">YOU</span>
-                                <span className="font-mono text-3xl font-bold">{myScore}</span>
+                        <div className="py-6 space-y-3">
+                            <div className="flex justify-between items-center bg-white/5 p-3 rounded-xl border border-white/5">
+                                <span className="text-gray-400 font-bold text-xs">YOU</span>
+                                <span className="font-mono text-2xl font-bold">{myScore}</span>
                             </div>
-                            <div className="flex justify-between items-center bg-white/5 p-4 rounded-xl border border-white/5">
-                                <span className="text-gray-400 font-bold text-sm">RIVAL</span>
-                                <span className="font-mono text-3xl font-bold text-gray-500">
+                            <div className="flex justify-between items-center bg-white/5 p-3 rounded-xl border border-white/5">
+                                <span className="text-gray-400 font-bold text-xs">RIVAL</span>
+                                <span className="font-mono text-2xl font-bold text-gray-500">
                                     {roomData.host === user.uid ? roomData.guestScore : roomData.hostScore}
                                 </span>
                             </div>
@@ -847,7 +866,7 @@ export default function App() {
 
                         <button 
                             onClick={() => window.location.reload()}
-                            className="w-full bg-white text-black py-4 rounded-xl font-black text-lg shadow-lg hover:scale-105 transition-transform active:scale-95"
+                            className="w-full bg-white text-black py-3 rounded-xl font-black text-lg shadow-lg hover:scale-105 transition-transform active:scale-95"
                         >
                             PLAY AGAIN
                         </button>
